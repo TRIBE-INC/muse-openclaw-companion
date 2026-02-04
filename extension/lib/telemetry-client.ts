@@ -320,7 +320,9 @@ export class TelemetryClient {
     }
   }
 
-  async flush(): Promise<{ sent: number; failed: number }> {
+  async flush(retryDepth: number = 0): Promise<{ sent: number; failed: number }> {
+    const MAX_AUTH_RETRIES = 1; // Only retry auth once to prevent infinite recursion
+
     await this.init();
 
     if (this.queue.length === 0) {
@@ -359,14 +361,17 @@ export class TelemetryClient {
         this.isOnline = true;
         this.logger.debug(`Flushed ${sent} events`);
       } else if (response.status === 401) {
-        // Auth failed, try refresh
-        const refreshed = await this.refreshToken();
-        if (refreshed) {
-          // Retry flush
-          return this.flush();
+        // Auth failed, try refresh (but only once to prevent infinite loop)
+        if (retryDepth < MAX_AUTH_RETRIES) {
+          const refreshed = await this.refreshToken();
+          if (refreshed) {
+            // Retry flush with incremented depth
+            return this.flush(retryDepth + 1);
+          }
         }
         this.lastError = "Authentication failed";
         failed = batch.length;
+        this.logger.error("Auth failed after token refresh attempt");
       } else {
         this.lastError = `Server error: ${response.status}`;
         failed = batch.length;

@@ -214,11 +214,18 @@ export class SessionSync {
       // Get server sessions list
       const serverSessions = await this.fetchServerSessionsList(token);
 
-      // Find sessions to upload (local but not on server or modified)
-      const toUpload = this.findSessionsToUpload(localSessions, serverSessions, options.force);
+      // Find sessions to sync with conflict detection
+      const { toUpload, toDownload, conflicts } = this.findSessionsToSync(
+        localSessions,
+        serverSessions,
+        options.force
+      );
 
-      // Find sessions to download (on server but not local or newer)
-      const toDownload = this.findSessionsToDownload(localSessions, serverSessions);
+      // Track conflicts
+      result.conflicts = conflicts.length;
+      if (conflicts.length > 0) {
+        this.logger.debug(`Detected ${conflicts.length} conflicts, using last-write-wins resolution`);
+      }
 
       // Upload sessions
       for (const sessionId of toUpload.slice(0, this.config.maxSessionsPerSync)) {
@@ -328,14 +335,17 @@ export class SessionSync {
     }
   }
 
-  private findSessionsToUpload(
+  private findSessionsToSync(
     local: Map<string, { mtime: number; entryCount: number }>,
     server: ServerSession[],
     force?: boolean
-  ): string[] {
+  ): { toUpload: string[]; toDownload: string[]; conflicts: string[] } {
     const serverMap = new Map(server.map((s) => [s.id, s]));
     const toUpload: string[] = [];
+    const toDownload: string[] = [];
+    const conflicts: string[] = [];
 
+    // Find sessions to upload (local changes)
     for (const [sessionId, localInfo] of local) {
       const serverSession = serverMap.get(sessionId);
       const lastSynced = this.state.syncedSessions[sessionId] || 0;
@@ -347,33 +357,46 @@ export class SessionSync {
         toUpload.push(sessionId);
       } else if (localInfo.mtime > lastSynced) {
         // Local session modified since last sync
-        toUpload.push(sessionId);
+        // Check if server also has changes (conflict)
+        if (serverSession.lastModified > lastSynced) {
+          // Both local and server modified - conflict!
+          // Use last-write-wins: compare timestamps
+          if (localInfo.mtime >= serverSession.lastModified) {
+            // Local is newer or equal, upload
+            toUpload.push(sessionId);
+          } else {
+            // Server is newer, download
+            toDownload.push(sessionId);
+          }
+          conflicts.push(sessionId);
+        } else {
+          // Only local modified, safe to upload
+          toUpload.push(sessionId);
+        }
       }
     }
 
-    return toUpload;
-  }
-
-  private findSessionsToDownload(
-    local: Map<string, { mtime: number; entryCount: number }>,
-    server: ServerSession[]
-  ): string[] {
-    const toDownload: string[] = [];
-
+    // Find sessions to download (server-only or server newer)
     for (const serverSession of server) {
       const localInfo = local.get(serverSession.id);
       const lastSynced = this.state.syncedSessions[serverSession.id] || 0;
 
       if (!localInfo) {
-        // Session doesn't exist locally
+        // Session doesn't exist locally, download
         toDownload.push(serverSession.id);
-      } else if (serverSession.lastModified > lastSynced && serverSession.entryCount > localInfo.entryCount) {
-        // Server has newer version with more entries
-        toDownload.push(serverSession.id);
+      } else if (!conflicts.includes(serverSession.id)) {
+        // Not already handled as a conflict
+        if (serverSession.lastModified > lastSynced && serverSession.entryCount > localInfo.entryCount) {
+          // Server has newer version with more entries (and no local changes)
+          const localModified = localInfo.mtime > lastSynced;
+          if (!localModified) {
+            toDownload.push(serverSession.id);
+          }
+        }
       }
     }
 
-    return toDownload;
+    return { toUpload, toDownload, conflicts };
   }
 
   private async loadLocalSession(sessionId: string): Promise<LogSession | null> {
