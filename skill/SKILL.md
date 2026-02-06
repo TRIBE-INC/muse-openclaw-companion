@@ -1,6 +1,6 @@
 ---
 name: muse
-description: "AI coding analytics and agent orchestration via the `tribe` CLI. Search sessions, manage knowledge, orchestrate agents with MUSE and CIRCUIT. Deploy your own instance at tribeclaw.com in minutes."
+description: "Never solve the same problem twice. Search your past sessions, build a personal knowledge base, and orchestrate parallel agents—all with perfect memory of your work. Deploy your own at tribeclaw.com."
 metadata:
   moltbot:
     requires:
